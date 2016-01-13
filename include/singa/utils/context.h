@@ -31,6 +31,11 @@
 
 #ifdef USE_GPU
 #include "singa/utils/cuda_utils.h"
+
+#ifdef USE_CUDNN
+#include <cudnn.h>
+#endif
+
 #endif
 
 namespace singa {
@@ -64,6 +69,13 @@ class Context {
         }
       }
     }
+#ifdef USE_CUDNN
+    for (auto& handle : cudnn_handle_) {
+      if (handle != nullptr)
+        CHECK_EQ(cudnnDestroy(handle), CUDNN_STATUS_SUCCESS);
+      handle = nullptr;
+    }
+#endif
 #endif
     for (auto& entry : rand_generator_) {
       if (entry.second != nullptr) {
@@ -77,11 +89,22 @@ class Context {
    */
   Context() {
     for (int i = 0; i < kMaxNumGPU; i++) {
+#ifdef USE_GPU
       cublas_handle_.push_back(nullptr);
       curand_generator_.push_back(nullptr);
+#ifdef USE_CUDNN
+      cudnn_handle_.push_back(nullptr);
+#endif
+#endif
     }
   }
 
+  /**
+   * @return the device ID of the current thread.
+   */
+  int device_id() {
+    return device_id(std::this_thread::get_id());
+  }
   /**
    * @return the ID of the device attached to a given CPU thread, or -1 if this
    * thread has not been attached GPU device.
@@ -122,6 +145,13 @@ class Context {
   }
 
   /**
+   * \copybreif rand_generator(const std::thread::id&);
+   * @return the CPU random generator for the calling thread.
+   */
+  std::mt19937* rand_generator() {
+    return rand_generator(std::this_thread::get_id());
+  }
+  /**
    * Get the CPU random generator.
    * If the generator does not exist, then create it now.
    * If the seed is not set, i.e., seed=-1, then get a seed from system time.
@@ -130,15 +160,22 @@ class Context {
    */
   std::mt19937* rand_generator(const std::thread::id& tid) {
     if (rand_generator_.find(tid) == rand_generator_.end()) {
-      CHECK(seed_.find(tid) != seed_.end());
+      // CHECK(seed_.find(tid) != seed_.end());
       auto seed = static_cast<unsigned>(seed_[tid]);
-      if (seed_[tid] == -1)
+      if (seed_.find(tid) == seed_.end() || seed_.at(tid) == -1)
         seed = std::chrono::system_clock::now().time_since_epoch().count();
       rand_generator_[tid] = new std::mt19937(seed);
     }
     return rand_generator_[tid];
   }
 #ifdef USE_GPU
+  /**
+   * \copybreif cublas_handle_(const std::thread::id&);
+   * @return cublas handle for the calling thread.
+   */
+  cublasHandle_t cublas_handle() {
+    return cublas_handle(std::this_thread::get_id());
+  }
   /**
    * Get the handler of the GPU which is assigned to the given thread.
    * Calls cublas_handle(const int);
@@ -175,6 +212,7 @@ class Context {
    */
   curandGenerator_t curand_generator(const int device_id) {
     CHECK_GE(device_id, 0);
+    CHECK_LT(device_id, cudnn_handle_.size());
     if (curand_generator_.at(device_id) == nullptr) {
       // TODO(wangwei) handle user set seed
       /*
@@ -187,6 +225,28 @@ class Context {
     }
     return curand_generator_[device_id];
   }
+
+#ifdef USE_CUDNN
+  cudnnHandle_t cudnn_handle() {
+    return cudnn_handle(std::this_thread::get_id());
+  }
+
+  cudnnHandle_t cudnn_handle(const std::thread::id thread_id) {
+    return cudnn_handle(device_id(thread_id));
+  }
+
+  cudnnHandle_t cudnn_handle(const int device_id) {
+    CHECK_GE(device_id, 0);
+    CHECK_LT(device_id, cudnn_handle_.size());
+    if (cudnn_handle_.at(device_id) == nullptr) {
+      ActivateDevice(device_id);
+      // LOG(ERROR) << "create cudnn handle for device " << device_id;
+      CHECK_EQ(cudnnCreate(&cudnn_handle_[device_id]), CUDNN_STATUS_SUCCESS);
+    }
+    // LOG(ERROR) << "use cudnn handle from device " << device_id;
+    return cudnn_handle_[device_id];
+  }
+#endif
 
 #endif
 
@@ -204,6 +264,10 @@ class Context {
   std::vector<cublasHandle_t> cublas_handle_;
   //!< cublas rand generator indexed by GPU device ID
   std::vector<curandGenerator_t> curand_generator_;
+
+#ifdef USE_CUDNN
+  std::vector<cudnnHandle_t> cudnn_handle_;
+#endif
 #endif
 };
 
